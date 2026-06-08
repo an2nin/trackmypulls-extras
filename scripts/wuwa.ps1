@@ -25,6 +25,53 @@ Write-Host "`n`nAttempting to locate the game installation directory..." -Foregr
 $gamePath = $null
 $gachaLogPathExists = $false
 
+function Decrypt-ClientLog {
+    param (
+        [byte[]]$Data
+    )
+
+    $result = New-Object byte[] $Data.Length
+
+    for ($i = 0; $i -lt $Data.Length; $i++) {
+        $b = $Data[$i]
+
+        if ((($b -band 0x0F) % 2) -eq 1) {
+            $result[$i] = $b -bxor 0xA5
+        }
+        else {
+            $result[$i] = $b -bxor 0xEF
+        }
+    }
+
+    return $result
+}
+
+function Read-SharedFileBytes {
+    param (
+        [string]$Path
+    )
+
+    $stream = $null
+
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+
+        $memoryStream = New-Object System.IO.MemoryStream
+        $stream.CopyTo($memoryStream)
+        return $memoryStream.ToArray()
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
 # Search registry entries for game installation path
 foreach ($regPath in $registryPaths) {
     try {
@@ -121,14 +168,29 @@ $gachaLogPath = $gamePath + '\Client\Saved\Logs\Client.log'
 $gachaUrlEntry = $null
 
 if (Test-Path $gachaLogPath) {
-    $gachaUrlEntry = Get-Content $gachaLogPath | Select-String -Pattern "https://aki-gm-resources-oversea\.aki-game\.(net|com)" | Select-Object -Last 1
+    try {
+        $encryptedBytes = Read-SharedFileBytes $gachaLogPath
+        $decryptedBytes = Decrypt-ClientLog $encryptedBytes
+    }
+    catch {
+        Write-Host "`nUnable to read the log file while the game is running. Close the game and try again, or rerun after the log is flushed." -ForegroundColor Red
+        $decryptedBytes = $null
+    }
+
+    if ($decryptedBytes) {
+        $text = [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
+
+        $gachaUrlEntry = [regex]::Matches(
+            $text,
+            'https://aki-gm-resources-oversea\.aki-game\.(?:net|com)[^\s"<>]+'
+        ) |
+            Select-Object -Last 1
+    }
 }
 
 # Determine which URL to use and copy to clipboard
 if ($gachaUrlEntry) {
-    if ($gachaUrlEntry) {
-        $urlToCopy = $gachaUrlEntry -replace '.*?(https://aki-gm-resources-oversea\.aki-game\.(net|com)[^"]*).*', '$1'
-    }
+    $urlToCopy = $gachaUrlEntry.Value
 
     if ([string]::IsNullOrWhiteSpace($urlToCopy)) {
         Write-Host "`nConvene History URL not found in the log files. Please ensure that Convene History is open in game" -ForegroundColor Red
